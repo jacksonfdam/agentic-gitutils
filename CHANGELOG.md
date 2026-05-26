@@ -22,5 +22,8 @@ contracts (see [AGENTS.md](AGENTS.md)).
 - `git stats` — repo summary (commits, branches, top authors, top files).
 - `git visual-diff` — side-by-side HTML diff viewer with syntax highlighting and prev/next file navigation. View-only.
 - `git tui-diff` — side-by-side terminal diff viewer with ANSI colors, auto-paged through `less`. View-only.
+- `git utils` — meta-command with `version`, `update` (HTTPS-allowlisted, ff-only, dirty-tree refusal, optional `--require-signed` honoring `gitutils.requireSigned` config), `doctor` health check (now reports require-signed default), and `install-agent-hint` / `uninstall-agent-hint` for `~/.claude/CLAUDE.md` integration.
+- `VERSION` file for semver tracking; surfaced via `git utils version`.
+- `install.sh` now offers (interactively) to install the agent hint and probe for updates; pass `--yes`, `--no-hint`, or `--no-update-check` to control non-interactively.
 - `install.sh` — idempotent symlink installer with `--uninstall`.
 - `tests/smoke.sh` — exercises every command against a temp repo.

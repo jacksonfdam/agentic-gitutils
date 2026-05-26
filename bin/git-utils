@@ -1,0 +1,419 @@
+#!/usr/bin/env python3
+"""
+git-utils — meta-command for the git-utils toolkit.
+
+Subcommands:
+  version                       print the current local version
+  update [--check] [--yes]      check, then fast-forward update from origin
+  doctor                        verify install health
+  install-agent-hint [path]     add a discovery hint to ~/.claude/CLAUDE.md
+                                so AI agents see these commands in every project
+  uninstall-agent-hint [path]   remove that hint
+
+Security model for `update`:
+  * Resolves the install directory from this script's real path (not $CWD).
+  * Requires `origin` to be HTTPS, or SSH, to an allowlisted host
+    (github.com, gitlab.com, bitbucket.org, codeberg.org).
+  * Refuses to update if the working tree has uncommitted changes.
+  * Refuses to update if your local branch is ahead of origin.
+  * Uses `git pull --ff-only` — never merges or rebases unfamiliar history.
+  * Shows the incoming commits and asks for confirmation (unless `--yes`).
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+from typing import Optional
+
+# The install root is the parent of this script's bin/ directory — even when
+# the user calls us through a symlink, since we resolve() first.
+REPO_ROOT = Path(__file__).resolve().parent.parent
+VERSION_FILE = REPO_ROOT / "VERSION"
+DEFAULT_HINT_FILE = Path.home() / ".claude" / "CLAUDE.md"
+HINT_BEGIN = "<!-- gitutils:begin -->"
+HINT_END = "<!-- gitutils:end -->"
+
+ALLOWED_REMOTE_HOSTS = (
+    "github.com", "gitlab.com", "bitbucket.org", "codeberg.org",
+)
+
+CMD_NAMES = [
+    "git-json-log", "git-json-status", "git-json-diff", "git-json-diff-stat",
+    "git-json-branches", "git-json-blame", "git-json-show", "git-json-range",
+    "git-json-conflicts", "git-recent", "git-stats",
+    "git-visual-diff", "git-tui-diff",
+    "git-utils",
+]
+
+
+# ---------- version --------------------------------------------------------
+
+def read_version() -> str:
+    if VERSION_FILE.exists():
+        return VERSION_FILE.read_text().strip()
+    return "0.0.0-unknown"
+
+
+def cmd_version(_args) -> int:
+    print(read_version())
+    return 0
+
+
+# ---------- update ---------------------------------------------------------
+
+def run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, capture_output=True, text=True, **kw)
+
+
+def remote_url(repo: Path) -> Optional[str]:
+    p = run(["git", "-C", str(repo), "remote", "get-url", "origin"])
+    return p.stdout.strip() if p.returncode == 0 and p.stdout.strip() else None
+
+
+def verify_remote(url: str) -> tuple[bool, str]:
+    """Allow HTTPS-to-allowlisted-host and SSH-to-allowlisted-host only."""
+    if url.startswith("https://"):
+        m = re.match(r"https://([^/:]+)", url)
+        host = m.group(1) if m else ""
+        if any(host == h or host.endswith("." + h) for h in ALLOWED_REMOTE_HOSTS):
+            return True, f"HTTPS to {host}"
+        return False, f"HTTPS to '{host}' — not on the allowlist"
+    m = re.match(r"git@([^:]+):", url)
+    if m:
+        host = m.group(1)
+        if any(host == h or host.endswith("." + h) for h in ALLOWED_REMOTE_HOSTS):
+            return True, f"SSH to {host}"
+        return False, f"SSH to '{host}' — not on the allowlist"
+    return False, f"unrecognized scheme: {url!r}"
+
+
+def is_clean(repo: Path) -> bool:
+    p = run(["git", "-C", str(repo), "status", "--porcelain"])
+    return p.returncode == 0 and not p.stdout.strip()
+
+
+def current_branch(repo: Path) -> Optional[str]:
+    p = run(["git", "-C", str(repo), "symbolic-ref", "--short", "HEAD"])
+    return p.stdout.strip() if p.returncode == 0 and p.stdout.strip() else None
+
+
+def config_bool(repo: Path, key: str) -> bool:
+    p = run(["git", "-C", str(repo), "config", "--bool", key])
+    return p.returncode == 0 and p.stdout.strip() == "true"
+
+
+def verify_signed(repo: Path, ref: str) -> tuple[bool, str]:
+    """A target is acceptable if either the commit itself is signed and
+    verified, OR an annotated/signed tag pointing at that commit verifies.
+
+    Note: both checks rely on the user's GPG / SSH-signing keyring already
+    containing the public key of a signer they trust. This function does not
+    enforce *who* signed — only that *some* signature is present and valid.
+    Pair with `gpg --list-keys` (or `git config gpg.ssh.allowedSignersFile`)
+    in your environment for stricter trust."""
+    # Commit signature.
+    c = run(["git", "-C", str(repo), "verify-commit", "--raw", ref])
+    if c.returncode == 0:
+        return True, f"commit {ref[:7]} signature OK"
+    # Tag signatures (any annotated, signed tag at that commit).
+    tags = run(["git", "-C", str(repo), "tag", "--points-at", ref])
+    candidates = [t for t in (tags.stdout or "").splitlines() if t.strip()]
+    failures = []
+    for tag in candidates:
+        t = run(["git", "-C", str(repo), "verify-tag", "--raw", tag])
+        if t.returncode == 0:
+            return True, f"tag {tag!r} signature OK"
+        failures.append(tag)
+    if candidates:
+        return False, (
+            f"none of the tags at {ref[:7]} verified ({', '.join(failures)}). "
+            "Import the signer's public key or use a different ref."
+        )
+    return False, (
+        f"no verified signature on commit {ref[:7]} and no signed tag points at it"
+    )
+
+
+def cmd_update(args) -> int:
+    repo = REPO_ROOT
+    print(f"git-utils v{read_version()} at {repo}")
+
+    url = remote_url(repo)
+    if not url:
+        sys.stderr.write(
+            "error: no `origin` remote on the install. Configure one with:\n"
+            f"  git -C {repo} remote add origin <url>\n"
+        )
+        return 1
+    ok, reason = verify_remote(url)
+    if not ok:
+        sys.stderr.write(
+            f"error: refusing to auto-update because the remote is unverified ({reason}).\n"
+            "If this is intentional, update by hand:\n"
+            f"  git -C {repo} pull --ff-only\n"
+        )
+        return 1
+    print(f"remote ok ({reason})")
+
+    if not is_clean(repo):
+        sys.stderr.write(
+            "error: the install has uncommitted changes — refusing to update.\n"
+            f"  cd {repo} && git status\n"
+        )
+        return 1
+
+    branch = current_branch(repo)
+    if not branch:
+        sys.stderr.write("error: detached HEAD on the install. Check out a branch first.\n")
+        return 1
+
+    print(f"fetching origin/{branch}…")
+    f = run(["git", "-C", str(repo), "fetch", "--quiet", "origin", branch])
+    if f.returncode != 0:
+        sys.stderr.write(f.stderr or "fetch failed.\n")
+        return f.returncode
+
+    behind = run(
+        ["git", "-C", str(repo), "rev-list", "--count", f"HEAD..origin/{branch}"]
+    ).stdout.strip() or "0"
+    ahead = run(
+        ["git", "-C", str(repo), "rev-list", "--count", f"origin/{branch}..HEAD"]
+    ).stdout.strip() or "0"
+
+    if behind == "0":
+        print("already up to date.")
+        return 0
+
+    if ahead != "0":
+        sys.stderr.write(
+            f"error: local branch is {ahead} commit(s) ahead of origin/{branch}.\n"
+            "Refusing to overwrite local work — push or rebase first.\n"
+        )
+        return 1
+
+    print(f"\n{behind} new commit(s) on origin/{branch}:\n")
+    subprocess.run(
+        ["git", "-C", str(repo), "--no-pager", "log",
+         "--oneline", f"HEAD..origin/{branch}"]
+    )
+    print()
+
+    # Signature verification, gated by either --require-signed or the
+    # gitutils.requireSigned bool config (so a user can make it the default
+    # for this install without remembering the flag).
+    require_signed = args.require_signed or config_bool(repo, "gitutils.requireSigned")
+    if require_signed:
+        ok, reason = verify_signed(repo, f"origin/{branch}")
+        if not ok:
+            sys.stderr.write(f"error: signature check failed: {reason}\n")
+            return 1
+        print(f"signature ok: {reason}")
+
+    if args.check:
+        print("(--check) skipping apply.")
+        return 0
+
+    if not args.yes:
+        try:
+            ans = input("apply update? [y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            ans = ""
+        if ans not in ("y", "yes"):
+            print("skipped.")
+            return 0
+
+    p = subprocess.run(
+        ["git", "-C", str(repo), "pull", "--ff-only", "--quiet", "origin", branch]
+    )
+    if p.returncode != 0:
+        return p.returncode
+
+    print(f"updated to v{read_version()}.")
+    return 0
+
+
+# ---------- doctor ---------------------------------------------------------
+
+def cmd_doctor(_args) -> int:
+    problems: list[str] = []
+    print(f"install: {REPO_ROOT}")
+    print(f"version: {read_version()}")
+
+    # Required dependencies.
+    for tool in ("git", "jq", "python3"):
+        p = run(["which", tool])
+        loc = p.stdout.strip()
+        if loc:
+            print(f"  {tool}: {loc}")
+        else:
+            problems.append(f"required dependency not found: {tool}")
+
+    # PATH check — can the shell find the commands?
+    for cmd in CMD_NAMES:
+        p = run(["bash", "-lc", f"command -v {cmd}"])
+        if not p.stdout.strip():
+            problems.append(f"command not on PATH: {cmd}")
+
+    if not problems or all(not p.startswith("command not on PATH") for p in problems):
+        print(f"  PATH: ok ({len(CMD_NAMES)} commands)")
+
+    # Remote check (advisory; not a hard error).
+    url = remote_url(REPO_ROOT)
+    if url:
+        ok, reason = verify_remote(url)
+        print(f"  remote: {url} — {reason}")
+        if not ok:
+            problems.append(f"remote not on allowlist ({reason})")
+    else:
+        print("  remote: (none)")
+
+    # Agent hint check.
+    if DEFAULT_HINT_FILE.exists() and HINT_BEGIN in DEFAULT_HINT_FILE.read_text():
+        print(f"  agent hint: installed at {DEFAULT_HINT_FILE}")
+    else:
+        print(f"  agent hint: not installed — run `git utils install-agent-hint`")
+
+    # Signature-requirement defaults.
+    require_signed = config_bool(REPO_ROOT, "gitutils.requireSigned")
+    print(f"  require-signed default: {'on' if require_signed else 'off'} "
+          f"(set via `git -C {REPO_ROOT} config gitutils.requireSigned true|false`)")
+
+    if problems:
+        sys.stderr.write("\nissues:\n  " + "\n  ".join(problems) + "\n")
+        return 1
+    print("\nall checks passed.")
+    return 0
+
+
+# ---------- agent-hint -----------------------------------------------------
+
+HINT_BODY = """# git-utils (JSON git toolkit)
+
+This machine has a JSON-emitting git toolkit installed at:
+  {root}
+
+Commands available in any git repo (already on PATH):
+
+  Agent-friendly (JSON output):
+    git json-log       git json-status      git json-diff
+    git json-diff-stat git json-branches    git json-blame
+    git json-show      git json-range       git json-conflicts
+
+  Surveys:
+    git recent         git stats
+
+  Viewers (read-only, side-by-side):
+    git visual-diff    (HTML in browser)
+    git tui-diff       (ANSI in terminal)
+
+When you need structured git data, prefer these over parsing raw
+`git log` / `git diff` text.
+
+Per-command JSON schemas: {root}/AGENTS.md
+Run any command with `--help` (or read its docstring) for usage.
+"""
+
+
+def render_hint() -> str:
+    body = HINT_BODY.format(root=REPO_ROOT).rstrip()
+    return f"{HINT_BEGIN}\n{body}\n{HINT_END}\n"
+
+
+def cmd_install_hint(args) -> int:
+    target = Path(args.path).expanduser() if args.path else DEFAULT_HINT_FILE
+    target.parent.mkdir(parents=True, exist_ok=True)
+    existing = target.read_text() if target.exists() else ""
+    block = render_hint()
+
+    if HINT_BEGIN in existing and HINT_END in existing:
+        updated = re.sub(
+            re.escape(HINT_BEGIN) + r".*?" + re.escape(HINT_END) + r"\n?",
+            block,
+            existing,
+            count=1,
+            flags=re.DOTALL,
+        )
+        action = "updated"
+    else:
+        sep = "\n" if existing and not existing.endswith("\n") else ""
+        if existing and not existing.endswith("\n\n"):
+            sep = ("\n" if existing.endswith("\n") else "\n\n")
+        updated = existing + sep + block
+        action = "added to"
+
+    target.write_text(updated)
+    print(f"{action} {target}")
+    return 0
+
+
+def cmd_uninstall_hint(args) -> int:
+    target = Path(args.path).expanduser() if args.path else DEFAULT_HINT_FILE
+    if not target.exists():
+        print(f"no file at {target} — nothing to remove.")
+        return 0
+    text = target.read_text()
+    if HINT_BEGIN not in text:
+        print(f"no gitutils block in {target}.")
+        return 0
+    updated = re.sub(
+        re.escape(HINT_BEGIN) + r".*?" + re.escape(HINT_END) + r"\n?",
+        "",
+        text,
+        count=1,
+        flags=re.DOTALL,
+    ).rstrip() + "\n"
+    target.write_text(updated)
+    print(f"removed gitutils block from {target}.")
+    return 0
+
+
+# ---------- main -----------------------------------------------------------
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="git utils",
+        description="git-utils meta-command (version, update, doctor, agent-hint).",
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("version", help="print the current local version")
+
+    up = sub.add_parser("update", help="check + apply updates from origin")
+    up.add_argument("--check", action="store_true",
+                    help="only report whether updates are available")
+    up.add_argument("--yes",   action="store_true",
+                    help="skip the confirmation prompt")
+    up.add_argument("--require-signed", action="store_true",
+                    help="refuse to apply unless origin/<branch> is a signed "
+                         "commit or has a verified signed tag. Honors the "
+                         "`gitutils.requireSigned` git config as the default.")
+
+    sub.add_parser("doctor", help="verify install health")
+
+    ih = sub.add_parser("install-agent-hint",
+                        help="add a discovery hint to ~/.claude/CLAUDE.md")
+    ih.add_argument("path", nargs="?", default=None,
+                    help="target file (default: ~/.claude/CLAUDE.md)")
+
+    uh = sub.add_parser("uninstall-agent-hint", help="remove the discovery hint")
+    uh.add_argument("path", nargs="?", default=None)
+
+    args = parser.parse_args()
+    handlers = {
+        "version": cmd_version,
+        "update": cmd_update,
+        "doctor": cmd_doctor,
+        "install-agent-hint": cmd_install_hint,
+        "uninstall-agent-hint": cmd_uninstall_hint,
+    }
+    return handlers[args.cmd](args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

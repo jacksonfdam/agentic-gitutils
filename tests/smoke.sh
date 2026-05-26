@@ -147,6 +147,32 @@ grep -q 'const DATA' "$out_html"            # JS that consumes the inlined data
 grep -q '"old_path"' "$out_html"            # data really was inlined
 grep -q '<title>git visual-diff' "$out_html" # page title rendered
 
+step "git utils"
+# version is read from the VERSION file at the install root.
+git utils version | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+'
+
+# --require-signed flag is parsed (we can't run a live update from the test
+# repo because it has no origin; just confirm the flag is accepted).
+git utils update --help | grep -q -- '--require-signed'
+
+# doctor surfaces the require-signed default.
+git utils doctor 2>&1 | grep -q 'require-signed default:'
+
+# agent-hint round trip against a temp file (don't touch the real ~/.claude).
+hint_file="$TMP/test-claude.md"
+echo "# pre-existing" > "$hint_file"
+git utils install-agent-hint "$hint_file" >/dev/null
+grep -q 'gitutils:begin' "$hint_file"
+grep -q 'gitutils:end' "$hint_file"
+grep -q 'json-log' "$hint_file"
+test "$(grep -c 'gitutils:begin' "$hint_file")" = "1"
+# Second install should update in place, not duplicate.
+git utils install-agent-hint "$hint_file" >/dev/null
+test "$(grep -c 'gitutils:begin' "$hint_file")" = "1"
+git utils uninstall-agent-hint "$hint_file" >/dev/null
+grep -q 'pre-existing' "$hint_file"
+! grep -q 'gitutils:begin' "$hint_file"
+
 step "git tui-diff"
 # By this point in the smoke run HEAD~1..HEAD is the "add shared" → "main
 # changes shared" range (set up for the conflict test above), which touches

@@ -26,10 +26,95 @@ cd agentic-gitutils
 INSTALL_DIR=/usr/local/bin ./install.sh
 ```
 
+The installer also offers (interactively) to:
+
+- add a discovery hint to `~/.claude/CLAUDE.md` so AI agents recognize these
+  commands in every project (see [Agent discovery](#agent-discovery) below)
+- check whether a newer version is available on `origin`
+
+Skip the prompts with flags: `--yes`, `--no-hint`, `--no-update-check`.
+
 Make sure the install dir is on your `PATH`. Any `bin/git-foo` then works as
 `git foo`.
 
-Uninstall: `./install.sh --uninstall`.
+Uninstall: `./install.sh --uninstall` (also removes the agent hint).
+
+## Versioning & updates
+
+The current version is in [`VERSION`](VERSION) and surfaced via:
+
+```sh
+git utils version
+```
+
+To check for a newer version on `origin` and apply it safely:
+
+```sh
+git utils update                       # interactive: shows incoming commits, asks y/N
+git utils update --check               # just report whether an update is available
+git utils update --yes                 # apply without prompting
+git utils update --require-signed      # refuse unless origin HEAD has a verified signature
+```
+
+To make signature verification the **default** for this install:
+
+```sh
+git -C "$(git utils version >/dev/null; dirname "$(readlink -f "$(command -v git-utils)")")/.." \
+    config gitutils.requireSigned true
+# or just: cd into the install dir and `git config gitutils.requireSigned true`
+```
+
+Signature verification accepts either:
+
+- a signed commit at `origin/<branch>` (`git verify-commit`), or
+- a signed annotated tag pointing at that commit (`git verify-tag`).
+
+Both checks rely on your local GPG / SSH-signing keyring already containing
+the public key of a signer you trust — `git utils` does not enforce *who*
+signed, only that the signature is valid. Pair with `gpg --list-keys` (or
+`gpg.ssh.allowedSignersFile`) for stricter trust.
+
+**Security model for `update`:**
+
+- Resolves the install dir from the binary's real path (no env-trust).
+- Requires `origin` to be HTTPS, or SSH, to an allowlisted host
+  (`github.com`, `gitlab.com`, `bitbucket.org`, `codeberg.org`).
+- Refuses to update if the working tree has uncommitted changes.
+- Refuses to update if your local branch is ahead of `origin`.
+- Uses `git pull --ff-only` only — never merges or rebases unfamiliar history.
+- Shows the incoming commits and asks for confirmation (skip with `--yes`).
+- Optional `--require-signed` (or `git config gitutils.requireSigned true`)
+  refuses to apply unless `origin/<branch>` has a verified signature on the
+  commit *or* on an annotated tag pointing at it.
+
+For a one-shot health check:
+
+```sh
+git utils doctor            # dependencies, PATH, remote, agent hint
+```
+
+## Agent discovery
+
+Two layers make these commands available *and* discoverable to AI agents in
+**every project on this machine**:
+
+1. **PATH** — `install.sh` symlinks the commands into `~/.local/bin`, so any
+   shell-launched agent inherits them just like `git` itself.
+2. **Awareness** — `git utils install-agent-hint` writes a delimited block
+   into `~/.claude/CLAUDE.md` listing the commands and pointing at
+   [`AGENTS.md`](AGENTS.md) for the JSON schemas. Claude Code loads this file
+   in every project automatically, so a new repo starts out with the agent
+   already knowing the tools exist.
+
+```sh
+git utils install-agent-hint                 # default target: ~/.claude/CLAUDE.md
+git utils install-agent-hint /path/to/file   # custom target
+git utils uninstall-agent-hint               # symmetric removal
+```
+
+The block is wrapped in `<!-- gitutils:begin -->` / `<!-- gitutils:end -->`
+markers — re-running `install-agent-hint` updates in place rather than
+duplicating; existing file content is preserved.
 
 ### Requirements
 
@@ -55,6 +140,7 @@ Uninstall: `./install.sh --uninstall`.
 | `git stats`          | Repo summary (commits, branches, top authors, top files)       |
 | `git visual-diff`    | Side-by-side HTML diff viewer (read-only, opens in browser)    |
 | `git tui-diff`       | Side-by-side terminal diff viewer (ANSI, pipes through `less`) |
+| `git utils`          | Meta-command: `version`, `update`, `doctor`, agent-hint mgmt   |
 
 Run any command with no arguments to see the default; forward extra args to
 the underlying `git` invocation where it makes sense.
