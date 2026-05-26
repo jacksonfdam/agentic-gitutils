@@ -125,6 +125,94 @@ type TouchedFile = {
 };
 ```
 
+### `git json-blame` → `Array<BlameLine>`
+
+```ts
+type BlameLine = {
+  line: number;          // final line number (1-based)
+  content: string;
+  commit: string;        // full SHA
+  abbreviated: string;
+  orig_line: number;     // line in the originating commit
+  author: string;
+  author_email: string;
+  author_date: string;   // ISO-8601 with offset
+  committer: string;
+  committer_email: string;
+  committer_date: string;
+  summary: string;       // commit subject
+  filename: string;      // path in the originating commit
+  previous: string | null;  // "<sha> <path>" or null
+  boundary: boolean;     // true when this is the oldest commit in scope
+};
+```
+
+### `git json-show` → `CommitFull`
+
+```ts
+type CommitFull = {
+  commit: string;
+  abbreviated: string;
+  parents: string[];
+  refs: string[];
+  author:    { name: string; email: string; date: string };
+  committer: { name: string; email: string; date: string };
+  subject: string;
+  body: string;
+  stats: { files_changed: number; insertions: number; deletions: number };
+  files: FileDiff[];     // same shape as `git json-diff` entries
+};
+```
+
+### `git json-range` → `Range`
+
+```ts
+type Range = {
+  base: string;          // input ref (e.g. "main")
+  head: string;          // input ref (e.g. "HEAD")
+  base_oid: string;
+  head_oid: string;
+  merge_base: string | null;
+  is_symmetric: boolean; // true if invoked with "<base>...<head>"
+  commits: Commit[];     // shape from git-json-log
+  files: Array<{
+    path: string;
+    added: number;
+    deleted: number;
+    binary: boolean;
+    mode: "added" | "deleted" | "modified" | "renamed" | "type-changed" | "unmerged";
+  }>;
+  authors: Array<{ name: string; email: string; commits: number }>;
+  stats: {
+    commits: number;
+    files_changed: number;
+    insertions: number;
+    deletions: number;
+  };
+};
+```
+
+### `git json-conflicts` → `Array<ConflictedFile>`
+
+```ts
+type ConflictedFile = {
+  path: string;
+  conflict_style: "merge" | "diff3";
+  conflicts: Array<{
+    start_line: number;          // 1-based line of <<<<<<<
+    end_line: number;            // 1-based line of >>>>>>>
+    ours_label: string;          // label after <<<<<<<, e.g. "HEAD"
+    base_label: string | null;   // label after |||||||, diff3 only
+    theirs_label: string;        // label after >>>>>>>
+    ours: string[];
+    base: string[] | null;       // present only with diff3
+    theirs: string[];
+    context_before: string[];    // up to 3 lines preceding the conflict
+    context_after:  string[];    // up to 3 lines following the conflict
+  }>;
+};
+```
+
 ### `git stats` → `RepoSummary`
 
 ```ts

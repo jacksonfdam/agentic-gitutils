@@ -14,6 +14,10 @@ contracts (see [AGENTS.md](AGENTS.md)).
 - `git json-diff` — unified diff parsed into files/hunks/lines.
 - `git json-diff-stat` — `git diff --numstat` as JSON.
 - `git json-branches` — local + remote branches with metadata.
+- `git json-blame` — per-line authorship with commit/author/date/summary.
+- `git json-show` — one commit fully expanded (metadata + per-file diff + stats).
+- `git json-range` — summary between two refs (commits, files, authors, stats).
+- `git json-conflicts` — currently-unmerged files with parsed conflict markers.
 - `git recent` — recently touched files, with touch count + last-seen metadata.
 - `git stats` — repo summary (commits, branches, top authors, top files).
 - `install.sh` — idempotent symlink installer with `--uninstall`.

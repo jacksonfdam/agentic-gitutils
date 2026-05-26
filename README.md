@@ -12,14 +12,15 @@ them painful to:
 - Feed to LLM agents that parse structured data more reliably than free-form text.
 - Compare across runs or commits without brittle line-based parsing.
 
+
 These commands produce stable JSON so the rest of your tooling can stop guessing.
 See [AGENTS.md](AGENTS.md) for the full schema contracts.
 
 ## Install
 
 ```sh
-git clone <this repo>
-cd git-utils
+git clone https://github.com/jacksonfdam/agentic-gitutils
+cd agentic-gitutils
 ./install.sh                       # symlinks bin/* into ~/.local/bin
 # or pick a different target:
 INSTALL_DIR=/usr/local/bin ./install.sh
@@ -46,6 +47,10 @@ Uninstall: `./install.sh --uninstall`.
 | `git json-diff`      | Full unified diff parsed into files/hunks/lines                |
 | `git json-diff-stat` | `--numstat` as JSON (`added`/`deleted`/`binary`/`path`)        |
 | `git json-branches`  | Local + remote branches with metadata                          |
+| `git json-blame`     | Per-line authorship JSON (commit, author, date, summary)       |
+| `git json-show`      | One commit fully expanded — metadata + per-file diff + stats   |
+| `git json-range`     | Summary between two refs — commits, files, authors, stats      |
+| `git json-conflicts` | Currently-unmerged files with parsed conflict markers          |
 | `git recent`         | Recently-touched files, with touch count + last-seen metadata  |
 | `git stats`          | Repo summary (commits, branches, top authors, top files)       |
 
@@ -99,6 +104,37 @@ git json-log -n 50 | gron | grep '\.author\.email' | sort -u
 
 ```sh
 git stats | jq '{ commits_total, branches, top_author: .authors[0] }'
+```
+
+### Who wrote each line of a file?
+
+```sh
+git json-blame src/foo.ts \
+  | jq -r '.[] | "\(.line)\t\(.abbreviated)\t\(.author)\t\(.summary)"'
+```
+
+### Single commit, fully expanded
+
+```sh
+git json-show HEAD \
+  | jq '{ subject, stats, files: [.files[] | { path: .new_path, mode }] }'
+```
+
+### What changed since the last release tag?
+
+```sh
+git json-range "v1.2.0..HEAD" \
+  | jq '{ commits: .stats.commits, files: .stats.files_changed,
+          authors: [.authors[] | .name],
+          biggest: ([.files[] | { path, lines: (.added + .deleted) }] | sort_by(-.lines) | .[0:5]) }'
+```
+
+### List currently-conflicted files structurally
+
+```sh
+git json-conflicts \
+  | jq '.[] | { path, n: (.conflicts | length),
+                first_ours: .conflicts[0].ours, first_theirs: .conflicts[0].theirs }'
 ```
 
 ## Layout
