@@ -87,9 +87,13 @@ git stats --all | jq -e '.commits_total == 3' >/dev/null
 git stats | jq -e '.authors | map(.name) | index("Smoke Tester") != null' >/dev/null
 
 step "git json-blame"
-git json-blame alpha.txt | jq -e 'type == "array" and length >= 1' >/dev/null
-git json-blame alpha.txt | jq -e '.[0].summary | test("alpha|tweak")' >/dev/null
-git json-blame alpha.txt | jq -e '.[0].author == "Smoke Tester"' >/dev/null
+# beta.txt has fully committed history (no staged edits) so blame attributes
+# its lines to the initial commit by "Smoke Tester" rather than to git's
+# synthetic "Not Committed Yet" pseudo-commit.
+git json-blame beta.txt | jq -e 'type == "array" and length == 1' >/dev/null
+git json-blame beta.txt | jq -e '.[0].author == "Smoke Tester"' >/dev/null
+git json-blame beta.txt | jq -e '.[0].summary == "init: alpha & beta"' >/dev/null
+git json-blame beta.txt | jq -e '.[0].abbreviated | test("^[0-9a-f]{7}$")' >/dev/null
 
 step "git json-show"
 git json-show | jq -e '.commit and .stats.files_changed >= 1' >/dev/null
