@@ -1,0 +1,424 @@
+#!/usr/bin/env python3
+"""
+git-visual-diff — open a side-by-side HTML viewer for `git diff`.
+
+View-only. Uses the structured output of `git-json-diff` and renders a
+two-column diff with syntax highlighting (highlight.js, loaded from CDN)
+and prev/next file navigation.
+
+Usage:
+  git visual-diff                       # working tree vs index
+  git visual-diff --cached              # index vs HEAD
+  git visual-diff main..HEAD            # branch range
+  git visual-diff main -- src/foo.ts    # working file vs main
+  git visual-diff v1.2.0..HEAD -- README.md
+
+Flags:
+  --no-open       don't launch the browser, just write the file
+  --print         print the HTML path to stdout instead of opening
+  --output PATH   write to PATH instead of an auto-named temp file
+
+Arguments other than the flags above are forwarded to `git diff` via
+`git-json-diff`.
+"""
+
+from __future__ import annotations
+
+import argparse
+import html
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import webbrowser
+from pathlib import Path
+from typing import Any
+
+HERE = Path(__file__).resolve().parent
+
+# Mapping from file extension to a highlight.js language hint. The CDN bundle
+# does language auto-detection on top of this, so missing extensions still
+# usually get highlighted — this is just a stronger hint.
+EXT_LANG = {
+    ".py": "python",     ".js": "javascript", ".jsx": "javascript",
+    ".ts": "typescript", ".tsx": "typescript",
+    ".rb": "ruby",       ".go": "go",         ".rs": "rust",
+    ".java": "java",     ".kt": "kotlin",     ".swift": "swift",
+    ".c": "c",           ".h": "c",           ".cpp": "cpp", ".cc": "cpp", ".hpp": "cpp",
+    ".cs": "csharp",     ".php": "php",       ".sh": "bash", ".zsh": "bash",
+    ".md": "markdown",   ".yml": "yaml",      ".yaml": "yaml",
+    ".json": "json",     ".toml": "ini",      ".ini": "ini",
+    ".html": "xml",      ".xml": "xml",       ".css": "css", ".scss": "scss",
+    ".sql": "sql",       ".lua": "lua",       ".pl": "perl",
+    ".dockerfile": "dockerfile",              ".tf": "hcl",
+}
+
+
+def lang_for(path: str) -> str:
+    name = os.path.basename(path).lower()
+    if name in ("dockerfile", "makefile"):
+        return name
+    _, ext = os.path.splitext(name)
+    return EXT_LANG.get(ext, "plaintext")
+
+
+def pair_hunk_lines(lines: list[dict[str, Any]]) -> list[tuple[dict | None, dict | None]]:
+    """Walk a hunk's line stream and return rows of (left, right) where each
+    side is the original line dict or None for a blank cell. Pairs each block
+    of contiguous removals with the immediately-following block of additions,
+    line-by-line; surplus goes to its own row with the other side blank."""
+    rows: list[tuple[dict | None, dict | None]] = []
+    i = 0
+    while i < len(lines):
+        op = lines[i]["op"]
+        if op == " ":
+            rows.append((lines[i], lines[i]))
+            i += 1
+        elif op == "-":
+            j = i
+            while j < len(lines) and lines[j]["op"] == "-":
+                j += 1
+            k = j
+            while k < len(lines) and lines[k]["op"] == "+":
+                k += 1
+            removed = lines[i:j]
+            added = lines[j:k]
+            for a, b in zip(removed, added):
+                rows.append((a, b))
+            for x in removed[len(added):]:
+                rows.append((x, None))
+            for x in added[len(removed):]:
+                rows.append((None, x))
+            i = k
+        elif op == "+":
+            j = i
+            while j < len(lines) and lines[j]["op"] == "+":
+                j += 1
+            for x in lines[i:j]:
+                rows.append((None, x))
+            i = j
+        else:
+            i += 1
+    return rows
+
+
+def build_view_model(files: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Pre-pair every hunk so the HTML side doesn't have to."""
+    out = []
+    for f in files:
+        hunks = []
+        for h in f.get("hunks", []):
+            rows = pair_hunk_lines(h.get("lines", []))
+            hunks.append({
+                "header": h.get("header", ""),
+                "rows": [
+                    {
+                        "left":  None if a is None else {"n": a.get("old_no"), "op": a["op"], "text": a["text"]},
+                        "right": None if b is None else {"n": b.get("new_no"), "op": b["op"], "text": b["text"]},
+                    }
+                    for (a, b) in rows
+                ],
+            })
+        out.append({
+            "old_path": f.get("old_path") or "",
+            "new_path": f.get("new_path") or "",
+            "mode": f.get("mode", "modified"),
+            "old_oid": f.get("old_oid"),
+            "new_oid": f.get("new_oid"),
+            "language": lang_for(f.get("new_path") or f.get("old_path") or ""),
+            "hunks": hunks,
+            "stats": {
+                "added":   sum(1 for h in f.get("hunks", []) for ln in h.get("lines", []) if ln["op"] == "+"),
+                "deleted": sum(1 for h in f.get("hunks", []) for ln in h.get("lines", []) if ln["op"] == "-"),
+            },
+        })
+    return out
+
+
+HTML_TEMPLATE = r"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>git visual-diff — __TITLE__</title>
+<link rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css"
+      media="(prefers-color-scheme: light)">
+<link rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css"
+      media="(prefers-color-scheme: dark)">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<style>
+  :root {
+    --bg: #fff; --fg: #1a1a1a; --muted: #6b7280; --border: #e5e7eb;
+    --add-bg: #e6ffec; --add-bar: #2da44e;
+    --del-bg: #ffebe9; --del-bar: #cf222e;
+    --empty-bg: #f6f8fa;
+    --header-bg: #f6f8fa;
+    --link: #0969da;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0d1117; --fg: #c9d1d9; --muted: #8b949e; --border: #30363d;
+      --add-bg: #033a16; --add-bar: #3fb950;
+      --del-bg: #67060c; --del-bar: #f85149;
+      --empty-bg: #161b22;
+      --header-bg: #161b22;
+      --link: #58a6ff;
+    }
+  }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg);
+               font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
+  header { position: sticky; top: 0; z-index: 10; background: var(--header-bg);
+           border-bottom: 1px solid var(--border); padding: 8px 14px;
+           display: flex; align-items: center; gap: 10px; }
+  header .title { font-weight: 600; }
+  header .nav button { font: inherit; padding: 4px 8px; border: 1px solid var(--border);
+                       background: var(--bg); color: var(--fg); border-radius: 4px; cursor: pointer; }
+  header .nav button:disabled { opacity: 0.4; cursor: default; }
+  header select { font: inherit; padding: 4px 6px; max-width: 60ch; flex: 1;
+                  background: var(--bg); color: var(--fg);
+                  border: 1px solid var(--border); border-radius: 4px; }
+  header .pos { color: var(--muted); font-variant-numeric: tabular-nums; }
+  main { padding: 14px; }
+  .file { display: none; }
+  .file.active { display: block; }
+  .file .meta { color: var(--muted); margin-bottom: 8px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .file .meta .mode { padding: 1px 6px; border-radius: 3px; background: var(--empty-bg); margin-left: 6px; }
+  .file .stats .add { color: var(--add-bar); }
+  .file .stats .del { color: var(--del-bar); }
+
+  table.diff { width: 100%; border-collapse: collapse; table-layout: fixed;
+               font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+  table.diff col.gutter { width: 4.5ch; }
+  table.diff col.code   { width: calc(50% - 4.5ch); }
+  table.diff tr.hunk-header td { background: var(--empty-bg); color: var(--muted);
+                                 padding: 4px 8px; border-top: 1px solid var(--border);
+                                 border-bottom: 1px solid var(--border); }
+  table.diff td { vertical-align: top; padding: 0; }
+  table.diff td.gutter { color: var(--muted); text-align: right; padding: 0 8px;
+                         user-select: none; border-right: 1px solid var(--border);
+                         font-variant-numeric: tabular-nums; }
+  table.diff td.code { padding: 0 8px; white-space: pre; overflow: hidden; }
+  table.diff td.code.del { background: var(--del-bg); border-left: 3px solid var(--del-bar); }
+  table.diff td.code.add { background: var(--add-bg); border-left: 3px solid var(--add-bar); }
+  table.diff td.code.empty { background: var(--empty-bg); }
+  table.diff td.gutter.del { background: var(--del-bg); }
+  table.diff td.gutter.add { background: var(--add-bg); }
+
+  .binary { padding: 24px; text-align: center; color: var(--muted); }
+  kbd { font: 11px ui-monospace, monospace; background: var(--empty-bg);
+        border: 1px solid var(--border); border-radius: 3px; padding: 1px 5px; }
+</style>
+</head>
+<body>
+<header>
+  <span class="title">git visual-diff</span>
+  <span class="nav">
+    <button id="prev" title="Previous file (←)">←</button>
+    <button id="next" title="Next file (→)">→</button>
+  </span>
+  <select id="file-picker"></select>
+  <span class="pos"><span id="cur">1</span> / <span id="total">1</span></span>
+</header>
+<main id="files"></main>
+
+<script>
+const DATA = __DATA__;
+
+function escapeHTML(s) {
+  return s.replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+}
+
+function renderFile(file) {
+  const wrap = document.createElement('section');
+  wrap.className = 'file';
+  const langClass = 'language-' + (file.language || 'plaintext');
+
+  const meta = document.createElement('div');
+  meta.className = 'meta';
+  const title = file.mode === 'renamed'
+    ? `${file.old_path} → ${file.new_path}`
+    : (file.new_path || file.old_path);
+  meta.innerHTML = `<strong>${escapeHTML(title)}</strong>
+    <span class="mode">${file.mode}</span>
+    <span class="stats">
+      <span class="add">+${file.stats.added}</span>
+      <span class="del">-${file.stats.deleted}</span>
+    </span>`;
+  wrap.appendChild(meta);
+
+  if (file.mode === 'binary') {
+    const div = document.createElement('div');
+    div.className = 'binary';
+    div.textContent = 'Binary file — not shown.';
+    wrap.appendChild(div);
+    return wrap;
+  }
+
+  const table = document.createElement('table');
+  table.className = 'diff';
+  table.innerHTML = `
+    <colgroup>
+      <col class="gutter"><col class="code"><col class="gutter"><col class="code">
+    </colgroup>`;
+  const tbody = document.createElement('tbody');
+
+  for (const h of file.hunks) {
+    const hr = document.createElement('tr');
+    hr.className = 'hunk-header';
+    const td = document.createElement('td');
+    td.colSpan = 4;
+    td.textContent = h.header;
+    hr.appendChild(td);
+    tbody.appendChild(hr);
+
+    for (const row of h.rows) {
+      const tr = document.createElement('tr');
+      const L = row.left, R = row.right;
+      tr.appendChild(makeGutter(L));
+      tr.appendChild(makeCode(L, langClass));
+      tr.appendChild(makeGutter(R));
+      tr.appendChild(makeCode(R, langClass));
+      tbody.appendChild(tr);
+    }
+  }
+  table.appendChild(tbody);
+  wrap.appendChild(table);
+  return wrap;
+}
+
+function makeGutter(side) {
+  const td = document.createElement('td');
+  td.className = 'gutter';
+  if (!side) { td.classList.add('empty'); td.textContent = ''; return td; }
+  if (side.op === '-') td.classList.add('del');
+  if (side.op === '+') td.classList.add('add');
+  td.textContent = side.n != null ? side.n : '';
+  return td;
+}
+
+function makeCode(side, langClass) {
+  const td = document.createElement('td');
+  td.className = 'code';
+  if (!side) { td.classList.add('empty'); return td; }
+  if (side.op === '-') td.classList.add('del');
+  if (side.op === '+') td.classList.add('add');
+  const code = document.createElement('code');
+  code.className = langClass;
+  code.textContent = side.text;
+  td.appendChild(code);
+  return td;
+}
+
+const main = document.getElementById('files');
+const picker = document.getElementById('file-picker');
+const totalEl = document.getElementById('total');
+const curEl = document.getElementById('cur');
+const prev = document.getElementById('prev');
+const next = document.getElementById('next');
+
+DATA.forEach((file, i) => {
+  const node = renderFile(file);
+  if (i === 0) node.classList.add('active');
+  main.appendChild(node);
+  const opt = document.createElement('option');
+  opt.value = i;
+  const title = file.mode === 'renamed'
+    ? `${file.old_path} → ${file.new_path}`
+    : (file.new_path || file.old_path);
+  opt.textContent = `${title} (+${file.stats.added}/-${file.stats.deleted})`;
+  picker.appendChild(opt);
+});
+totalEl.textContent = DATA.length || 1;
+
+let cur = 0;
+function show(i) {
+  if (DATA.length === 0) return;
+  i = Math.max(0, Math.min(DATA.length - 1, i));
+  cur = i;
+  curEl.textContent = i + 1;
+  picker.value = i;
+  document.querySelectorAll('.file').forEach((n, idx) => n.classList.toggle('active', idx === i));
+  prev.disabled = i === 0;
+  next.disabled = i >= DATA.length - 1;
+  document.querySelectorAll('.file.active code').forEach(el => {
+    if (!el.dataset.hl) { hljs.highlightElement(el); el.dataset.hl = '1'; }
+  });
+}
+
+picker.addEventListener('change', e => show(+e.target.value));
+prev.addEventListener('click', () => show(cur - 1));
+next.addEventListener('click', () => show(cur + 1));
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'SELECT' || e.target.tagName === 'INPUT') return;
+  if (e.key === 'ArrowLeft' || e.key === 'k') show(cur - 1);
+  if (e.key === 'ArrowRight' || e.key === 'j') show(cur + 1);
+});
+
+show(0);
+</script>
+</body>
+</html>
+"""
+
+
+def render(view: list[dict[str, Any]], title: str) -> str:
+    data = json.dumps(view)
+    return HTML_TEMPLATE.replace("__TITLE__", html.escape(title)).replace("__DATA__", data)
+
+
+def main() -> int:
+    # Pre-split known flags so we can pass everything else through to git diff.
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--no-open", action="store_true")
+    parser.add_argument("--print",   dest="print_path", action="store_true")
+    parser.add_argument("--output",  default=None)
+    known, passthrough = parser.parse_known_args()
+
+    # If the user asked for --help, surface ours.
+    if "-h" in passthrough or "--help" in passthrough:
+        print(__doc__)
+        return 0
+
+    json_diff = HERE / "git-json-diff"
+    proc = subprocess.run(
+        [str(json_diff), *passthrough],
+        check=False, text=True, capture_output=True,
+    )
+    if proc.returncode != 0:
+        sys.stderr.write(proc.stderr)
+        return proc.returncode
+    try:
+        files = json.loads(proc.stdout or "[]")
+    except json.JSONDecodeError as e:
+        sys.stderr.write(f"git-visual-diff: invalid JSON from git-json-diff: {e}\n")
+        return 1
+
+    view = build_view_model(files)
+    title = " ".join(passthrough) or "working tree vs index"
+    html_doc = render(view, title)
+
+    if known.output:
+        out_path = Path(known.output).resolve()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(html_doc)
+    else:
+        fd, name = tempfile.mkstemp(prefix="git-visual-diff-", suffix=".html")
+        with os.fdopen(fd, "w") as f:
+            f.write(html_doc)
+        out_path = Path(name)
+
+    if known.print_path or not view:
+        # Always print path when there's nothing to open (empty diff) so the
+        # user isn't left wondering whether anything happened.
+        print(out_path)
+
+    if not known.no_open and view:
+        webbrowser.open(out_path.as_uri())
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

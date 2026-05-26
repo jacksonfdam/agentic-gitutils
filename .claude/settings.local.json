@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 /Users/jackson.mafra/Downloads/Projects/GitUtils/fix_status.py)",
+      "Bash(grep -n -E 'tokens|\\\\$i' /Users/jackson.mafra/Downloads/Projects/GitUtils/bin/git-json-status)",
+      "Bash(chmod +x /Users/jackson.mafra/Downloads/Projects/GitUtils/bin/git-json-blame)",
+      "Bash(python3 -c ' *)",
+      "Bash(chmod +x /Users/jackson.mafra/Downloads/Projects/GitUtils/bin/git-json-show)",
+      "Bash(chmod +x /Users/jackson.mafra/Downloads/Projects/GitUtils/bin/git-json-range)"
+    ]
+  }
+}

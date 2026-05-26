@@ -229,6 +229,19 @@ type RepoSummary = {
 };
 ```
 
+### `git utils` — meta-command (text output, not JSON)
+
+This one is not a data emitter; it manages the install itself. Agents
+should mostly leave it alone, with two exceptions:
+
+- `git utils version` — print the installed semver. Useful when an agent
+  needs to record which version of the toolkit it relied on for a result.
+- `git utils doctor` — quick environment check. Helpful when a JSON command
+  returns nothing unexpected, to confirm the toolkit is actually wired up.
+
+Never invoke `git utils update` from an agent without explicit user
+consent — it changes the install on disk.
+
 ## Tips for agent prompts
 
 - **Always validate before assuming**: pipe through `| jq -e 'type == "array"'`
