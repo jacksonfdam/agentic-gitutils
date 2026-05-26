@@ -1,0 +1,124 @@
+#!/usr/bin/env python3
+"""
+git-json-show — one commit, fully expanded.
+
+Output:
+  {
+    "commit":      "abc…",
+    "abbreviated": "abc1234",
+    "parents":     ["…"],
+    "refs":        ["HEAD -> main", ...],
+    "author":    { "name": "...", "email": "...", "date": "ISO-8601" },
+    "committer": { "name": "...", "email": "...", "date": "ISO-8601" },
+    "subject":     "...",
+    "body":        "...",
+    "stats":       { "files_changed": 3, "insertions": 42, "deletions": 7 },
+    "files":       [ ...same shape as git-json-diff... ]
+  }
+
+Usage:
+  git json-show            # HEAD
+  git json-show <ref>      # any single commit
+  git json-show HEAD~3
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+
+HERE = Path(__file__).resolve().parent
+
+
+def run(cmd: list[str]) -> str:
+    proc = subprocess.run(cmd, check=False, text=True, capture_output=True)
+    if proc.returncode != 0:
+        sys.stderr.write(proc.stderr)
+        sys.exit(proc.returncode)
+    return proc.stdout
+
+
+def meta(ref: str) -> dict:
+    # Use the same NUL+RS pattern as git-json-log, scoped to one commit.
+    fmt = ("%H%x00%h%x00%P%x00%D%x00%an%x00%ae%x00%aI"
+           "%x00%cn%x00%ce%x00%cI%x00%s%x00%b%x1e")
+    raw = run(["git", "log", "-1", f"--pretty=format:{fmt}", ref])
+    record = raw.rstrip("\x1e\n")
+    fields = record.split("\x00")
+    if len(fields) < 12:
+        sys.stderr.write(f"git-json-show: unexpected log output for {ref!r}\n")
+        sys.exit(1)
+    return {
+        "commit": fields[0],
+        "abbreviated": fields[1],
+        "parents": [p for p in fields[2].split(" ") if p],
+        "refs": [r for r in fields[3].split(", ") if r],
+        "author":    {"name": fields[4], "email": fields[5], "date": fields[6]},
+        "committer": {"name": fields[7], "email": fields[8], "date": fields[9]},
+        "subject": fields[10],
+        "body": fields[11],
+    }
+
+
+def files(ref: str, parents: list[str]) -> list[dict]:
+    """Delegate to git-json-diff for the file-level shape. For merge commits,
+    diff against the first parent so the output remains a flat array."""
+    diff_arg = f"{ref}^!"  # equivalent to <ref>^..<ref> for non-root commits
+    if not parents:
+        # Root commit: compare empty tree to ref.
+        empty_tree = run(["git", "hash-object", "-t", "tree", "/dev/null"]).strip()
+        diff_arg_args = [empty_tree, ref]
+    else:
+        diff_arg_args = [diff_arg]
+
+    json_diff = HERE / "git-json-diff"
+    proc = subprocess.run(
+        [str(json_diff), *diff_arg_args],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        sys.stderr.write(proc.stderr)
+        sys.exit(proc.returncode)
+    return json.loads(proc.stdout or "[]")
+
+
+def stats(file_records: list[dict]) -> dict:
+    files_changed = len(file_records)
+    insertions = 0
+    deletions = 0
+    for f in file_records:
+        for h in f.get("hunks", []):
+            for line in h.get("lines", []):
+                if line["op"] == "+":
+                    insertions += 1
+                elif line["op"] == "-":
+                    deletions += 1
+    return {
+        "files_changed": files_changed,
+        "insertions": insertions,
+        "deletions": deletions,
+    }
+
+
+def main() -> int:
+    ref = sys.argv[1] if len(sys.argv) > 1 else "HEAD"
+    m = meta(ref)
+    f = files(ref, m["parents"])
+    out = {
+        **m,
+        "stats": stats(f),
+        "files": f,
+    }
+    json.dump(out, sys.stdout, indent=2)
+    sys.stdout.write("\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
