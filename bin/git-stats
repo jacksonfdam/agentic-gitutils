@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+# git-stats — quick repo summary as JSON.
+#
+# Output:
+#   {
+#     "head":           { "branch": "main", "oid": "abc…", "subject": "…" },
+#     "remotes":        ["origin", ...],
+#     "commits_total":  1234,
+#     "branches":       { "local": 5, "remote": 12 },
+#     "tags":           7,
+#     "authors": [
+#       { "name": "Jane", "email": "j@x", "commits": 412 }, ...
+#     ],
+#     "files_top": [
+#       { "path": "src/big.ts", "touches": 88 }, ...
+#     ],
+#     "first_commit_date": "2024-01-02T...",
+#     "last_commit_date":  "2026-05-26T..."
+#   }
+#
+# Honors --all to count across all refs (default: HEAD history only).
+
+set -euo pipefail
+
+scope=()
+if [[ "${1:-}" == "--all" ]]; then
+  scope=(--all)
+  shift
+fi
+
+# Gather raw bits with separate git calls; assemble in jq at the end.
+commits_total=$(git rev-list --count "${scope[@]:-HEAD}")
+local_branches=$(git for-each-ref refs/heads --format='.' | wc -l | tr -d ' ')
+remote_branches=$(git for-each-ref refs/remotes --format='.' | wc -l | tr -d ' ')
+tags=$(git for-each-ref refs/tags --format='.' | wc -l | tr -d ' ')
+remotes_json=$(git remote | jq -Rn '[inputs | select(length>0)]')
+
+head_branch=$(git symbolic-ref --quiet --short HEAD 2>/dev/null || echo "")
+head_oid=$(git rev-parse HEAD 2>/dev/null || echo "")
+head_subject=$(git log -1 --pretty=%s 2>/dev/null || echo "")
+
+first_date=$(git log "${scope[@]:-HEAD}" --reverse --pretty=%cI 2>/dev/null | head -n1)
+last_date=$(git log "${scope[@]:-HEAD}" -1 --pretty=%cI 2>/dev/null || echo "")
+
+# Author leaderboard: name<TAB>email<TAB>count
+authors_json=$(
+  git shortlog -sne "${scope[@]:-HEAD}" 2>/dev/null \
+  | awk '{
+      count=$1
+      # Reassemble "name <email>" from $2..$NF
+      rest=""
+      for (i=2;i<=NF;i++) rest = rest (i==2?"":" ") $i
+      # Extract email between <>
+      email=""
+      if (match(rest, /<[^>]+>/)) {
+        email=substr(rest, RSTART+1, RLENGTH-2)
+        name=substr(rest, 1, RSTART-2)
+      } else {
+        name=rest
+      }
+      printf "%s\t%s\t%d\n", name, email, count
+    }' \
+  | jq -Rn '
+    [inputs | split("\t") | {name: .[0], email: .[1], commits: (.[2]|tonumber)}]
+  '
+)
+
+# Top-touched files (across the chosen scope).
+files_top_json=$(
+  git log "${scope[@]:-HEAD}" --name-only --pretty=format: 2>/dev/null \
+  | awk 'NF' \
+  | sort | uniq -c \
+  | sort -rn \
+  | head -n 20 \
+  | awk '{ count=$1; $1=""; sub(/^ /,""); printf "%d\t%s\n", count, $0 }' \
+  | jq -Rn '
+    [inputs | split("\t") | {path: .[1], touches: (.[0]|tonumber)}]
+  '
+)
+
+jq -n \
+  --arg head_branch "$head_branch" \
+  --arg head_oid "$head_oid" \
+  --arg head_subject "$head_subject" \
+  --argjson remotes "$remotes_json" \
+  --argjson commits_total "$commits_total" \
+  --argjson local_branches "$local_branches" \
+  --argjson remote_branches "$remote_branches" \
+  --argjson tags "$tags" \
+  --argjson authors "$authors_json" \
+  --argjson files_top "$files_top_json" \
+  --arg first_date "$first_date" \
+  --arg last_date "$last_date" '
+{
+  head: {
+    branch:  ( $head_branch | (if . == "" then null else . end) ),
+    oid:     ( $head_oid    | (if . == "" then null else . end) ),
+    subject: ( $head_subject | (if . == "" then null else . end) )
+  },
+  remotes: $remotes,
+  commits_total: $commits_total,
+  branches: { local: $local_branches, remote: $remote_branches },
+  tags: $tags,
+  authors: $authors,
+  files_top: $files_top,
+  first_commit_date: ( $first_date | (if . == "" then null else . end) ),
+  last_commit_date:  ( $last_date  | (if . == "" then null else . end) )
+}'
