@@ -27,3 +27,4 @@ contracts (see [AGENTS.md](AGENTS.md)).
 - `install.sh` now offers (interactively) to install the agent hint and probe for updates; pass `--yes`, `--no-hint`, or `--no-update-check` to control non-interactively.
 - `install.sh` — idempotent symlink installer with `--uninstall`.
 - `tests/smoke.sh` — exercises every command against a temp repo.
+- `.github/workflows/release.yml` — auto-versioning on push to `main`. Conventional-commit-aware bump (patch / minor / major), annotated tag `vX.Y.Z`, optional GitHub Release with auto-notes. Recursion-guarded via `paths-ignore: VERSION` + `[skip release]` marker.

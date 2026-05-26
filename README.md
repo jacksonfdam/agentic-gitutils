@@ -281,6 +281,45 @@ AGENTS.md        # JSON contracts for agent consumers
 Creates a temp repo, exercises every command, asserts shape with `jq -e`,
 and cleans up.
 
+## Release workflow
+
+A GitHub Action at [`.github/workflows/release.yml`](.github/workflows/release.yml)
+automates versioning. **On every push to `main`:**
+
+1. Determines the bump level from conventional-commit prefixes since the
+   last tag:
+   - `feat!:` or `BREAKING CHANGE:` in any commit → **major**
+   - `feat(scope)?:` in any commit → **minor**
+   - everything else → **patch**
+   - bot's own `chore(release):` commits are excluded from the analysis
+2. Increments [`VERSION`](VERSION).
+3. Commits the bump as `chore(release): bump to vX.Y.Z [skip release]`.
+4. Creates an **annotated tag** `vX.Y.Z`.
+5. Pushes both the commit and the tag.
+6. Opens a GitHub Release with auto-generated notes via `gh release create`.
+
+**Recursion is prevented two ways:**
+
+- `paths-ignore: VERSION` on the trigger — the bot's own commit touches only
+  `VERSION` and never re-fires the workflow.
+- `[skip release]` marker on the bot's commit message, checked by the job's
+  `if:` filter.
+
+**Skipping a release** for a specific push: include `[skip release]` in the
+commit subject or body.
+
+**Permissions**: the workflow uses the default `GITHUB_TOKEN` with
+`permissions: contents: write`. No external secrets needed for the basic
+flow. If your `main` is protected by required reviews, the workflow's push
+will be rejected — either exempt the `github-actions[bot]` user from the
+protection or move the bump to a PR-based flow.
+
+**Signing tags**: the default workflow creates unsigned annotated tags. To
+sign them, add a GPG (or SSH-signing) key as a repo secret and add
+`run: git config user.signingkey …` plus `-s` to the `git tag` call. Once
+tags are signed, downstream users of `git utils update --require-signed`
+will accept the release.
+
 Inspired by:
 
 - [gron](https://github.com/tomnomnom/gron) — Make JSON greppable.

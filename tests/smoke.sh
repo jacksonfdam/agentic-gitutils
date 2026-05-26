@@ -197,5 +197,16 @@ positions = sorted({ln.index("│") for ln in sys.stdin.read().splitlines() if "
 assert len(positions) == 1, f"separator misaligned: columns {positions}"
 '
 
+step "release workflow"
+# Project file, not exercised at runtime — but assert key safety properties
+# so a stray edit can't introduce an infinite-trigger loop.
+wf="$HERE/.github/workflows/release.yml"
+test -f "$wf"
+grep -q "paths-ignore:" "$wf"
+grep -q "VERSION" "$wf"
+grep -q "skip release" "$wf"
+grep -q "chore(release):" "$wf"
+grep -q "git push origin" "$wf"
+
 echo
 echo "all smoke tests passed in $TMP"

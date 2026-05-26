@@ -1,0 +1,135 @@
+name: Release
+
+# Bumps VERSION and creates a vX.Y.Z tag on every push to main that contains
+# releasable commits. See docs/release.md (and the README "Release workflow"
+# section) for the full design.
+#
+# Recursion guards:
+#   * paths-ignore: VERSION   — the bot's own bump commit (which only touches
+#                                VERSION) will not re-trigger this workflow.
+#   * commit message marker   — the bot tags its commits with "[skip release]"
+#                                and the job-level `if:` filters them out as
+#                                belt-and-suspenders.
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'VERSION'
+
+permissions:
+  contents: write   # required to push the bump commit and the tag
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    if: ${{ !contains(github.event.head_commit.message, '[skip release]') }}
+    steps:
+      - name: Checkout (full history + tags)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # needed for `git describe --tags`
+          persist-credentials: true
+
+      - name: Configure git identity
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Determine semver bump from conventional commits
+        id: bump
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          last_tag="$(git describe --tags --abbrev=0 2>/dev/null || echo '')"
+          if [ -z "$last_tag" ]; then
+            range="HEAD"
+            echo "no prior tag — scanning entire history."
+          else
+            range="${last_tag}..HEAD"
+            echo "last tag: $last_tag"
+          fi
+
+          # Walk each commit in range; ignore the bot's own release commits.
+          bump=""
+          releasable=0
+          while IFS= read -r sha; do
+            [ -z "$sha" ] && continue
+            msg="$(git log -1 --pretty='%s%n%b' "$sha")"
+            if printf '%s\n' "$msg" | head -n1 | grep -qE '^chore\(release\):'; then
+              continue
+            fi
+            releasable=$((releasable + 1))
+
+            if printf '%s\n' "$msg" | grep -qE '(^[^[:space:]]+!:|^BREAKING[ -]CHANGE:)'; then
+              bump=major; break
+            fi
+            if printf '%s\n' "$msg" | head -n1 | grep -qE '^feat(\(.+\))?:'; then
+              if [ "$bump" != "major" ]; then bump=minor; fi
+            fi
+          done < <(git log --pretty='%H' "$range")
+
+          if [ "$releasable" -eq 0 ]; then
+            echo "no releasable commits since ${last_tag:-the dawn of time} — skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ -z "$bump" ]; then bump=patch; fi
+          echo "decision: $bump  (releasable commits: $releasable)"
+          echo "bump=$bump" >> "$GITHUB_OUTPUT"
+
+      - name: Compute new version
+        if: steps.bump.outputs.skip != 'true'
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          cur="$(tr -d '[:space:]' < VERSION)"
+          IFS='.' read -r maj min pat <<< "$cur"
+          case "${{ steps.bump.outputs.bump }}" in
+            major) maj=$((maj+1)); min=0; pat=0 ;;
+            minor) min=$((min+1)); pat=0 ;;
+            patch) pat=$((pat+1)) ;;
+            *) echo "error: unknown bump '${{ steps.bump.outputs.bump }}'" >&2; exit 1 ;;
+          esac
+          new="${maj}.${min}.${pat}"
+
+          if git rev-parse -q --verify "refs/tags/v${new}" >/dev/null; then
+            echo "error: tag v${new} already exists — aborting." >&2
+            exit 1
+          fi
+
+          echo "previous: ${cur}"
+          echo "next:     ${new}  (${{ steps.bump.outputs.bump }})"
+          echo "new=${new}" >> "$GITHUB_OUTPUT"
+          echo "previous=${cur}" >> "$GITHUB_OUTPUT"
+
+      - name: Bump VERSION, commit, tag, push
+        if: steps.bump.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          new="${{ steps.version.outputs.new }}"
+          printf '%s\n' "$new" > VERSION
+          git add VERSION
+          # `[skip release]` here prevents recursion even if paths-ignore is
+          # ever loosened in the future.
+          git commit -m "chore(release): bump to v${new} [skip release]"
+          git tag -a "v${new}" -m "v${new}"
+          git push origin "HEAD:${GITHUB_REF#refs/heads/}"
+          git push origin "v${new}"
+
+      - name: Create GitHub Release with auto-generated notes
+        if: steps.bump.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "v${{ steps.version.outputs.new }}" \
+            --title "v${{ steps.version.outputs.new }}" \
+            --generate-notes
