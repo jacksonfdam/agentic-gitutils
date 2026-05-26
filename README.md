@@ -3,14 +3,6 @@
 Small collection of custom `git` subcommands that emit **JSON**, making git
 output greppable, pipeable, and agent-friendly.
 
-Inspired by:
-
-- [gron](https://github.com/tomnomnom/gron) — Make JSON greppable.
-- [diffparser](https://github.com/petereon/diffparser) — Parse `git diff` to JSON.
-- [git log → JSON via jq](https://til.simonwillison.net/jq/git-log-json) — Simon Willison.
-- [Cali0707/git-utils](https://github.com/Cali0707/git-utils) — Reference custom-command repo.
-- [Custom git commands](https://www.calummurray.ca/blog/custom-git-commands).
-
 ## Why JSON?
 
 `git log`, `git diff`, and `git status` emit text shaped for humans. That makes
@@ -126,6 +118,15 @@ AGENTS.md        # JSON contracts for agent consumers
 
 Creates a temp repo, exercises every command, asserts shape with `jq -e`,
 and cleans up.
+
+Inspired by:
+
+- [gron](https://github.com/tomnomnom/gron) — Make JSON greppable.
+- [diffparser](https://github.com/petereon/diffparser) — Parse `git diff` to JSON.
+- [git log → JSON via jq](https://til.simonwillison.net/jq/git-log-json) — Simon Willison.
+- [Cali0707/git-utils](https://github.com/Cali0707/git-utils) — Reference custom-command repo.
+- [Custom git commands](https://www.calummurray.ca/blog/custom-git-commands).
+
 
 ## Contributing
 
