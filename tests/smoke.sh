@@ -136,5 +136,32 @@ git json-conflicts | jq -e '
 
 git merge --abort 2>/dev/null || true
 
+step "git visual-diff"
+out_html="$TMP/visual.html"
+git visual-diff --no-open --output "$out_html" --cached >/dev/null 2>&1 || true
+git visual-diff --no-open --output "$out_html" HEAD~1..HEAD >/dev/null
+test -s "$out_html"
+grep -q 'highlight.js' "$out_html"          # CDN script tag is in static HTML
+grep -q 'table.diff' "$out_html"            # CSS selector is in static HTML
+grep -q 'const DATA' "$out_html"            # JS that consumes the inlined data
+grep -q '"old_path"' "$out_html"            # data really was inlined
+grep -q '<title>git visual-diff' "$out_html" # page title rendered
+
+step "git tui-diff"
+# By this point in the smoke run HEAD~1..HEAD is the "add shared" → "main
+# changes shared" range (set up for the conflict test above), which touches
+# shared.txt only. We assert on structural markers + that file's name to
+# keep the test robust to surrounding history changes.
+out_tui=$(git tui-diff --no-pager --no-color --width 120 HEAD~1..HEAD)
+# A file header was emitted (### <path>  [mode]  +N/-N).
+echo "$out_tui" | grep -qE '^### .*\.txt'
+echo "$out_tui" | grep -q 'shared.txt'
+# A hunk header is present.
+echo "$out_tui" | grep -q '@@ '
+# Two-column layout: every diff row uses U+2502 as the separator.
+echo "$out_tui" | grep -q '│'
+# At least one row has the gutter "<n>  <marker>" shape.
+echo "$out_tui" | grep -qE '^\s*[0-9]+\s+[-+ ]'
+
 echo
 echo "all smoke tests passed in $TMP"
