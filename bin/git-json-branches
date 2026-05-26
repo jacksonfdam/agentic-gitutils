@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# git-json-branches — local + remote branches with metadata as JSON.
+#
+# Each entry:
+#   {
+#     "name":           "feature/foo",
+#     "refname":        "refs/heads/feature/foo",
+#     "kind":           "local" | "remote",
+#     "is_head":        true,
+#     "oid":            "abc…",
+#     "upstream":       "origin/feature/foo" | null,
+#     "ahead":          1,
+#     "behind":         0,
+#     "author_name":    "Jane",
+#     "author_email":   "jane@example.com",
+#     "committer_date": "2026-05-26T10:11:12+02:00",
+#     "subject":        "fix: handle empty input"
+#   }
+#
+# Usage:
+#   git json-branches              # local + remote
+#   git json-branches --local      # only refs/heads/*
+#   git json-branches --remote     # only refs/remotes/*
+
+set -euo pipefail
+
+scope=both
+case "${1:-}" in
+  --local)  scope=local;  shift ;;
+  --remote) scope=remote; shift ;;
+esac
+
+refs=(refs/heads refs/remotes)
+case "$scope" in
+  local)  refs=(refs/heads)   ;;
+  remote) refs=(refs/remotes) ;;
+esac
+
+# Use NUL field separator and RS record separator so any branch name or commit
+# subject survives the round-trip.
+fmt='%(refname)%00%(refname:short)%00%(objectname)%00%(HEAD)%00%(upstream:short)%00%(upstream:track)%00%(authorname)%00%(authoremail)%00%(committerdate:iso8601-strict)%00%(contents:subject)%1e'
+
+git for-each-ref --format="$fmt" "${refs[@]}" "$@" \
+| jq -Rs '
+  split("")
+  | map(select(length > 0))
+  | map(split(" "))
+  | map(
+      .[5] as $track
+      | (if ($track | test("ahead (\\d+)")) then ($track | capture("ahead (?<n>\\d+)") | .n | tonumber) else 0 end) as $ahead
+      | (if ($track | test("behind (\\d+)")) then ($track | capture("behind (?<n>\\d+)") | .n | tonumber) else 0 end) as $behind
+      | {
+          refname:        .[0],
+          name:           .[1],
+          oid:            .[2],
+          kind:           (if (.[0] | startswith("refs/remotes/")) then "remote" else "local" end),
+          is_head:        (.[3] == "*"),
+          upstream:       (if .[4] == "" then null else .[4] end),
+          ahead:          $ahead,
+          behind:         $behind,
+          author_name:    .[6],
+          author_email:   (.[7] | ltrimstr("<") | rtrimstr(">")),
+          committer_date: .[8],
+          subject:        .[9]
+        }
+    )
+'
