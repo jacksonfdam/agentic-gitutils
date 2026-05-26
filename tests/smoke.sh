@@ -188,6 +188,14 @@ echo "$out_tui" | grep -q '@@ '
 echo "$out_tui" | grep -q '│'
 # At least one row has the gutter "<n>  <marker>" shape.
 echo "$out_tui" | grep -qE '^\s*[0-9]+\s+[-+ ]'
+# Alignment invariant: every line that contains │ has it at the same column.
+# Regression guard for the bug where pure-addition rows (None on the left)
+# rendered one column shorter than context rows, shifting the separator.
+echo "$out_tui" | python3 -c '
+import sys
+positions = sorted({ln.index("│") for ln in sys.stdin.read().splitlines() if "│" in ln})
+assert len(positions) == 1, f"separator misaligned: columns {positions}"
+'
 
 echo
 echo "all smoke tests passed in $TMP"

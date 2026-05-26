@@ -106,10 +106,18 @@ def expand_tabs(text: str, width: int = 4) -> str:
 def visible_truncate(text: str, w: int) -> str:
     """Truncate to w visible columns. Assumes monospace single-cell glyphs
     (i.e., doesn't handle CJK width). Adds a `…` marker when truncated."""
-    text = expand_tabs(text)
+    text = expand_tabs(text).rstrip("\r")  # drop trailing CRs from CRLF diffs
     if len(text) <= w:
         return text.ljust(w)
     return text[: w - 1] + "…"
+
+
+# Each side renders to exactly `gutter_w + 2 + code_w` visible columns.
+# The `2` is `space + marker` (the `+`/`-`/` ` glyph). Keep populated and
+# empty sides identical width — otherwise the separator and right pane
+# shift by one column on every row that has a None cell.
+def side_width(gutter_w: int, code_w: int) -> int:
+    return gutter_w + 2 + code_w
 
 
 def render_side(
@@ -119,7 +127,7 @@ def render_side(
     use_color: bool,
 ) -> str:
     if side is None:
-        return f"{' ' * gutter_w} {' ' * code_w}"
+        return " " * side_width(gutter_w, code_w)
     op = side["op"]
     n = side.get("n") if side.get("n") is not None else (side.get("old_no") or side.get("new_no"))
     n_str = "" if n is None else str(n)
