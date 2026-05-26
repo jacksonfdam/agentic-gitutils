@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+"""
+git-json-conflicts — list currently-unmerged files with their conflict
+markers parsed into structured chunks.
+
+Output:
+  [
+    {
+      "path": "src/foo.ts",
+      "conflict_style": "merge" | "diff3",
+      "conflicts": [
+        {
+          "start_line": 10,                 # 1-based line of <<<<<<<
+          "end_line":   25,                 # 1-based line of >>>>>>>
+          "ours_label":   "HEAD",
+          "base_label":   "merged common ancestors" | null,
+          "theirs_label": "feature/bar",
+          "ours":   ["line A", "line B"],
+          "base":   ["..."] | null,         # only with conflict.style=diff3
+          "theirs": ["line C"],
+          "context_before": ["..."],        # up to 3 lines before <<<<<<<
+          "context_after":  ["..."]         # up to 3 lines after >>>>>>>
+        }
+      ]
+    }
+  ]
+
+If there are no unmerged files, output is `[]`.
+
+Recognized markers (start-of-line):
+  <<<<<<<  ours_label
+  |||||||  base_label   (only when merge.conflictstyle=diff3)
+  =======
+  >>>>>>>  theirs_label
+"""
+
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+OURS_RE = "<" * 7
+BASE_RE = "|" * 7
+SEP_RE = "=" * 7
+THEIRS_RE = ">" * 7
+
+CONTEXT = 3  # lines of surrounding context to include
+
+
+def run(cmd: list[str], check: bool = True) -> str:
+    proc = subprocess.run(cmd, check=False, text=True, capture_output=True)
+    if proc.returncode != 0 and check:
+        sys.stderr.write(proc.stderr)
+        sys.exit(proc.returncode)
+    return proc.stdout
+
+
+def unmerged_paths() -> list[str]:
+    out = run(["git", "diff", "--name-only", "--diff-filter=U", "-z"])
+    return [p for p in out.split("\x00") if p]
+
+
+def parse_file(path: str) -> dict[str, Any] | None:
+    try:
+        text = Path(path).read_text(errors="replace")
+    except OSError as e:
+        sys.stderr.write(f"git-json-conflicts: cannot read {path}: {e}\n")
+        return None
+
+    lines = text.split("\n")
+    conflicts: list[dict[str, Any]] = []
+    style = "merge"
+
+    i = 0
+    n = len(lines)
+    while i < n:
+        line = lines[i]
+        if line.startswith(OURS_RE) and (len(line) == 7 or line[7] == " "):
+            start = i
+            ours_label = line[7:].lstrip()
+            base_label: str | None = None
+            ours: list[str] = []
+            base: list[str] | None = None
+            theirs: list[str] = []
+            phase = "ours"
+            j = i + 1
+            while j < n:
+                cur = lines[j]
+                if cur.startswith(BASE_RE) and (len(cur) == 7 or cur[7] == " "):
+                    base_label = cur[7:].lstrip()
+                    base = []
+                    phase = "base"
+                    style = "diff3"
+                elif cur.startswith(SEP_RE) and (len(cur) == 7):
+                    phase = "theirs"
+                elif cur.startswith(THEIRS_RE) and (len(cur) == 7 or cur[7] == " "):
+                    end = j
+                    theirs_label = cur[7:].lstrip()
+                    ctx_before = lines[max(0, start - CONTEXT):start]
+                    ctx_after = lines[end + 1: end + 1 + CONTEXT]
+                    conflicts.append({
+                        "start_line": start + 1,
+                        "end_line": end + 1,
+                        "ours_label": ours_label,
+                        "base_label": base_label,
+                        "theirs_label": theirs_label,
+                        "ours": ours,
+                        "base": base,
+                        "theirs": theirs,
+                        "context_before": ctx_before,
+                        "context_after": ctx_after,
+                    })
+                    i = j
+                    break
+                else:
+                    if phase == "ours":
+                        ours.append(cur)
+                    elif phase == "base" and base is not None:
+                        base.append(cur)
+                    else:
+                        theirs.append(cur)
+                j += 1
+            else:
+                # Unterminated conflict — bail on this file's parse cleanly.
+                break
+        i += 1
+
+    if not conflicts:
+        return None
+    return {"path": path, "conflict_style": style, "conflicts": conflicts}
+
+
+def main() -> int:
+    paths = unmerged_paths()
+    out = []
+    for p in paths:
+        rec = parse_file(p)
+        if rec is not None:
+            out.append(rec)
+    json.dump(out, sys.stdout, indent=2)
+    sys.stdout.write("\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
