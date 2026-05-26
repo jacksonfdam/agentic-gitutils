@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# git-json-branches — local + remote branches with metadata as JSON.
+# git-json-branches -- local + remote branches with metadata as JSON.
 #
 # Each entry:
 #   {
@@ -7,7 +7,7 @@
 #     "refname":        "refs/heads/feature/foo",
 #     "kind":           "local" | "remote",
 #     "is_head":        true,
-#     "oid":            "abc…",
+#     "oid":            "abc...",
 #     "upstream":       "origin/feature/foo" | null,
 #     "ahead":          1,
 #     "behind":         0,
@@ -36,15 +36,16 @@ case "$scope" in
   remote) refs=(refs/remotes) ;;
 esac
 
-# Use NUL field separator and RS record separator so any branch name or commit
-# subject survives the round-trip.
+# NUL field separator + RS record separator so branch names and commit
+# subjects survive the round-trip with arbitrary content.
 fmt='%(refname)%00%(refname:short)%00%(objectname)%00%(HEAD)%00%(upstream:short)%00%(upstream:track)%00%(authorname)%00%(authoremail)%00%(committerdate:iso8601-strict)%00%(contents:subject)%1e'
 
 git for-each-ref --format="$fmt" "${refs[@]}" "$@" \
 | jq -Rs '
-  split("")
+  split("\u001e")
+  | map(ltrimstr("\n"))   # for-each-ref appends "\n" after each record
   | map(select(length > 0))
-  | map(split(" "))
+  | map(split("\u0000"))
   | map(
       .[5] as $track
       | (if ($track | test("ahead (\\d+)")) then ($track | capture("ahead (?<n>\\d+)") | .n | tonumber) else 0 end) as $ahead
