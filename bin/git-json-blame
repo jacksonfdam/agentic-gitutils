@@ -1,0 +1,177 @@
+#!/usr/bin/env python3
+"""
+git-json-blame — per-line authorship as JSON.
+
+Output:
+  [
+    {
+      "line": 1,                       # final line number
+      "content": "import foo from …",
+      "commit": "abc1234567…",         # full SHA
+      "abbreviated": "abc1234",
+      "orig_line": 1,                  # line number in originating commit
+      "author":        "Jane Doe",
+      "author_email":  "jane@example.com",
+      "author_date":   "2026-04-12T10:11:12+02:00",
+      "committer":     "Jane Doe",
+      "committer_email": "jane@example.com",
+      "committer_date":  "2026-04-12T10:11:12+02:00",
+      "summary":   "fix: handle empty input",
+      "filename":  "src/foo.ts",       # path in the originating commit
+      "previous":  "def4567 src/foo.ts" | null,
+      "boundary":  false
+    }
+  ]
+
+Usage:
+  git json-blame <file>
+  git json-blame <file> -L 10,40
+  git json-blame -L 10,40 <file>
+  git json-blame <file> <revision>
+
+Anything not understood here is forwarded to `git blame`.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import json
+import subprocess
+import sys
+from typing import Any
+
+
+def run_blame(argv: list[str]) -> str:
+    proc = subprocess.run(
+        ["git", "blame", "--porcelain", "--date=iso-strict", *argv],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        sys.stderr.write(proc.stderr)
+        sys.exit(proc.returncode)
+    return proc.stdout
+
+
+def epoch_to_iso(epoch: str, tz: str) -> str:
+    """Convert porcelain author-time/-tz pair to ISO-8601-strict."""
+    try:
+        ts = int(epoch)
+    except ValueError:
+        return ""
+    # tz is "+HHMM" or "-HHMM"
+    sign = 1 if tz.startswith("+") else -1
+    try:
+        hh = int(tz[1:3]); mm = int(tz[3:5])
+    except (ValueError, IndexError):
+        hh = mm = 0
+    offset = dt.timezone(sign * dt.timedelta(hours=hh, minutes=mm))
+    return dt.datetime.fromtimestamp(ts, tz=offset).isoformat()
+
+
+def parse(porcelain: str) -> list[dict[str, Any]]:
+    """Parse `git blame --porcelain` output into one record per final line."""
+    lines = porcelain.split("\n")
+    i = 0
+    n = len(lines)
+
+    # commit-sha -> shared metadata dict (porcelain only emits full details once)
+    commits: dict[str, dict[str, Any]] = {}
+    out: list[dict[str, Any]] = []
+
+    while i < n:
+        raw = lines[i]
+        if not raw:
+            i += 1
+            continue
+
+        # Header: <sha> <orig-line> <final-line> [<num-lines>]
+        head = raw.split(" ")
+        if len(head) < 3 or len(head[0]) < 7:
+            i += 1
+            continue
+        sha = head[0]
+        try:
+            orig_line = int(head[1])
+            final_line_start = int(head[2])
+        except ValueError:
+            i += 1
+            continue
+
+        meta = commits.setdefault(sha, {
+            "commit": sha,
+            "abbreviated": sha[:7],
+            "author": "", "author_email": "",
+            "author_time": "", "author_tz": "+0000",
+            "committer": "", "committer_email": "",
+            "committer_time": "", "committer_tz": "+0000",
+            "summary": "", "filename": "", "previous": None, "boundary": False,
+        })
+
+        i += 1
+        # Optional header lines until the content line (starts with TAB).
+        while i < n and not lines[i].startswith("\t"):
+            entry = lines[i]
+            if entry.startswith("author "):
+                meta["author"] = entry[len("author "):]
+            elif entry.startswith("author-mail "):
+                meta["author_email"] = entry[len("author-mail "):].strip("<>")
+            elif entry.startswith("author-time "):
+                meta["author_time"] = entry[len("author-time "):]
+            elif entry.startswith("author-tz "):
+                meta["author_tz"] = entry[len("author-tz "):]
+            elif entry.startswith("committer "):
+                meta["committer"] = entry[len("committer "):]
+            elif entry.startswith("committer-mail "):
+                meta["committer_email"] = entry[len("committer-mail "):].strip("<>")
+            elif entry.startswith("committer-time "):
+                meta["committer_time"] = entry[len("committer-time "):]
+            elif entry.startswith("committer-tz "):
+                meta["committer_tz"] = entry[len("committer-tz "):]
+            elif entry.startswith("summary "):
+                meta["summary"] = entry[len("summary "):]
+            elif entry.startswith("filename "):
+                meta["filename"] = entry[len("filename "):]
+            elif entry.startswith("previous "):
+                meta["previous"] = entry[len("previous "):]
+            elif entry == "boundary":
+                meta["boundary"] = True
+            i += 1
+
+        # Content line: starts with \t. There's one content line per blame record;
+        # multi-line groups are emitted as separate records with their own header.
+        if i < n and lines[i].startswith("\t"):
+            content = lines[i][1:]
+            out.append({
+                "line": final_line_start,
+                "content": content,
+                "commit": meta["commit"],
+                "abbreviated": meta["abbreviated"],
+                "orig_line": orig_line,
+                "author": meta["author"],
+                "author_email": meta["author_email"],
+                "author_date": epoch_to_iso(meta["author_time"], meta["author_tz"]),
+                "committer": meta["committer"],
+                "committer_email": meta["committer_email"],
+                "committer_date": epoch_to_iso(meta["committer_time"], meta["committer_tz"]),
+                "summary": meta["summary"],
+                "filename": meta["filename"],
+                "previous": meta["previous"],
+                "boundary": meta["boundary"],
+            })
+            i += 1
+
+    return out
+
+
+def main() -> int:
+    porcelain = run_blame(sys.argv[1:])
+    records = parse(porcelain)
+    json.dump(records, sys.stdout, indent=2)
+    sys.stdout.write("\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
