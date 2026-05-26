@@ -86,5 +86,51 @@ git stats | jq -e '.head.branch == "main" and .commits_total == 2' >/dev/null
 git stats --all | jq -e '.commits_total == 3' >/dev/null
 git stats | jq -e '.authors | map(.name) | index("Smoke Tester") != null' >/dev/null
 
+step "git json-blame"
+git json-blame alpha.txt | jq -e 'type == "array" and length >= 1' >/dev/null
+git json-blame alpha.txt | jq -e '.[0].summary | test("alpha|tweak")' >/dev/null
+git json-blame alpha.txt | jq -e '.[0].author == "Smoke Tester"' >/dev/null
+
+step "git json-show"
+git json-show | jq -e '.commit and .stats.files_changed >= 1' >/dev/null
+git json-show | jq -e '.subject == "tweak alpha"' >/dev/null
+git json-show HEAD~1 | jq -e '.stats.files_changed == 2 and .stats.insertions == 2' >/dev/null
+
+step "git json-range"
+out=$(git json-range HEAD~1..HEAD)
+echo "$out" | jq -e '.stats.commits == 1' >/dev/null
+echo "$out" | jq -e '.commits[0].subject == "tweak alpha"' >/dev/null
+echo "$out" | jq -e '.authors[0].commits == 1' >/dev/null
+echo "$out" | jq -e '[.files[].path] | index("alpha.txt") != null' >/dev/null
+
+step "git json-conflicts"
+# No conflicts yet — should emit [].
+git json-conflicts | jq -e '. == []' >/dev/null
+
+# Now force a real conflict between main and feature/wild on a shared file.
+echo "shared baseline"  > shared.txt
+git add shared.txt
+git commit -q -m "add shared"
+git checkout -q feature/wild
+echo "wild side"        > shared.txt
+git add shared.txt
+git commit -q -m "wild changes shared"
+git checkout -q main
+echo "main side"        > shared.txt
+git add shared.txt
+git commit -q -m "main changes shared"
+git -c merge.conflictstyle=diff3 merge feature/wild -q --no-commit || true
+
+git json-conflicts | jq -e '
+  type == "array" and length == 1
+  and .[0].path == "shared.txt"
+  and (.[0].conflicts | length) == 1
+  and .[0].conflict_style == "diff3"
+  and .[0].conflicts[0].ours[0] == "main side"
+  and .[0].conflicts[0].theirs[0] == "wild side"
+' >/dev/null
+
+git merge --abort 2>/dev/null || true
+
 echo
 echo "all smoke tests passed in $TMP"
