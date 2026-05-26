@@ -14,7 +14,9 @@ them painful to:
 
 
 These commands produce stable JSON so the rest of your tooling can stop guessing.
-See [AGENTS.md](AGENTS.md) for the full schema contracts.
+See [AGENTS.md](AGENTS.md) for the full schema contracts and
+[`docs/DEMO.md`](docs/DEMO.md) for live output from every command against a
+real public repo ([PoisonStack](https://github.com/jacksonfdam/poisonstack)).
 
 ## Install
 
