@@ -20,5 +20,7 @@ contracts (see [AGENTS.md](AGENTS.md)).
 - `git json-conflicts` — currently-unmerged files with parsed conflict markers.
 - `git recent` — recently touched files, with touch count + last-seen metadata.
 - `git stats` — repo summary (commits, branches, top authors, top files).
+- `git visual-diff` — side-by-side HTML diff viewer with syntax highlighting and prev/next file navigation. View-only.
+- `git tui-diff` — side-by-side terminal diff viewer with ANSI colors, auto-paged through `less`. View-only.
 - `install.sh` — idempotent symlink installer with `--uninstall`.
 - `tests/smoke.sh` — exercises every command against a temp repo.

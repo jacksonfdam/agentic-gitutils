@@ -53,6 +53,8 @@ Uninstall: `./install.sh --uninstall`.
 | `git json-conflicts` | Currently-unmerged files with parsed conflict markers          |
 | `git recent`         | Recently-touched files, with touch count + last-seen metadata  |
 | `git stats`          | Repo summary (commits, branches, top authors, top files)       |
+| `git visual-diff`    | Side-by-side HTML diff viewer (read-only, opens in browser)    |
+| `git tui-diff`       | Side-by-side terminal diff viewer (ANSI, pipes through `less`) |
 
 Run any command with no arguments to see the default; forward extra args to
 the underlying `git` invocation where it makes sense.
@@ -136,6 +138,44 @@ git json-conflicts \
   | jq '.[] | { path, n: (.conflicts | length),
                 first_ours: .conflicts[0].ours, first_theirs: .conflicts[0].theirs }'
 ```
+
+### Open a side-by-side viewer in the browser
+
+```sh
+git visual-diff                       # working tree vs index
+git visual-diff --cached              # staged
+git visual-diff main..feature         # branch range
+git visual-diff main -- src/foo.ts    # working file vs main
+git visual-diff v1.2.0..HEAD          # since-tag overview
+
+# Useful flags:
+#   --no-open      don't launch the browser
+#   --print        print the HTML path to stdout
+#   --output PATH  write the HTML to PATH instead of $TMPDIR
+```
+
+Navigate files with ←/→ or `j`/`k`; syntax highlighting via highlight.js
+(loaded from CDN). The viewer is read-only — there's no UI to accept or
+reject changes.
+
+### Same idea, but in the terminal
+
+```sh
+git tui-diff                          # working tree vs index, opens in less
+git tui-diff --cached
+git tui-diff main..feature
+git tui-diff main -- src/foo.ts
+git tui-diff v1.2.0..HEAD
+
+# Useful flags:
+#   --no-pager     write straight to stdout, no `less`
+#   --no-color     suppress ANSI escapes
+#   --width N      force a specific column width
+```
+
+ANSI side-by-side render, automatically piped through `less -RFX`. Inside
+`less`: `q` to quit, `/` to search, `n` / `N` for next / previous match.
+Width auto-detected from the terminal; respects `NO_COLOR=1`.
 
 ## Layout
 
