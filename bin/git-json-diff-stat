@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# git-json-diff-stat — `git diff --numstat` as a JSON array.
+#
+# Each entry:
+#   { "added": 12, "deleted": 3, "path": "src/foo.ts", "binary": false }
+#
+# Binary files report `null` for added/deleted in numstat; we surface that as
+# binary: true and zeros for the numeric fields.
+#
+# Usage:
+#   git json-diff-stat                  # working tree vs index
+#   git json-diff-stat --cached         # index vs HEAD
+#   git json-diff-stat HEAD~5..HEAD     # ref range
+#   git json-diff-stat main...feature   # symmetric range
+
+set -euo pipefail
+
+git diff --numstat -z "$@" \
+| jq -Rs '
+  split(" ")
+  | map(select(length > 0))
+  | map(split("\t"))
+  | map({
+      added:   (if .[0] == "-" then 0 else (.[0]|tonumber) end),
+      deleted: (if .[1] == "-" then 0 else (.[1]|tonumber) end),
+      binary:  (.[0] == "-"),
+      path:    .[2]
+    })
+'

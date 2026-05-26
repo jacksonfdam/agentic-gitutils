@@ -1,0 +1,212 @@
+#!/usr/bin/env python3
+"""
+git-json-diff — parse `git diff` (unified format) into structured JSON.
+
+Output is a JSON array; each element describes one file:
+
+  {
+    "from":      "a/src/foo.ts",
+    "to":        "b/src/foo.ts",
+    "old_path":  "src/foo.ts",
+    "new_path":  "src/foo.ts",
+    "mode":      "modified" | "added" | "deleted" | "renamed" | "binary",
+    "old_mode":  "100644" | null,
+    "new_mode":  "100644" | null,
+    "old_oid":   "abc…"    | null,
+    "new_oid":   "def…"    | null,
+    "similarity": 95       | null,   # only for renames/copies
+    "hunks": [
+      {
+        "old_start": 10, "old_lines": 4,
+        "new_start": 10, "new_lines": 6,
+        "header": "@@ -10,4 +10,6 @@ function foo()",
+        "lines": [
+          { "op": " ", "old_no": 10,  "new_no": 10,  "text": "..." },
+          { "op": "-", "old_no": 11,  "new_no": null,"text": "..." },
+          { "op": "+", "old_no": null,"new_no": 11,  "text": "..." }
+        ]
+      }
+    ]
+  }
+
+All args are forwarded to `git diff`.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import subprocess
+import sys
+from typing import Any
+
+HUNK_RE = re.compile(
+    r"^@@ -(?P<oa>\d+)(?:,(?P<ob>\d+))? \+(?P<na>\d+)(?:,(?P<nb>\d+))? @@(?P<ctx>.*)$"
+)
+
+
+def run_diff(argv: list[str]) -> str:
+    proc = subprocess.run(
+        ["git", "diff", *argv],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    if proc.returncode not in (0, 1):
+        sys.stderr.write(proc.stderr)
+        sys.exit(proc.returncode)
+    if proc.stderr:
+        sys.stderr.write(proc.stderr)
+    return proc.stdout
+
+
+def split_ab(diff_header: str) -> tuple[str, str]:
+    # `diff --git a/<x> b/<y>` — paths may contain spaces. Git wraps paths with
+    # special chars in quotes; we don't handle quoted form here.
+    rest = diff_header[len("diff --git "):]
+    # Split on the last occurrence of " b/" preceded by " a/" at the start.
+    if rest.startswith("a/"):
+        # Find " b/" that begins the second path.
+        i = rest.find(" b/")
+        if i != -1:
+            return rest[:i], rest[i + 1:]
+    # Fallback: split on space midpoint.
+    halves = rest.split(" ", 1)
+    return halves[0], halves[1] if len(halves) > 1 else ""
+
+
+def strip_prefix(p: str) -> str:
+    if p.startswith("a/") or p.startswith("b/"):
+        return p[2:]
+    return p
+
+
+def parse(diff_text: str) -> list[dict[str, Any]]:
+    files: list[dict[str, Any]] = []
+    cur: dict[str, Any] | None = None
+    hunk: dict[str, Any] | None = None
+    old_no = new_no = 0
+
+    def close_hunk():
+        nonlocal hunk
+        if hunk is not None and cur is not None:
+            cur["hunks"].append(hunk)
+            hunk = None
+
+    def close_file():
+        nonlocal cur
+        close_hunk()
+        if cur is not None:
+            files.append(cur)
+            cur = None
+
+    for raw in diff_text.splitlines():
+        if raw.startswith("diff --git "):
+            close_file()
+            frm, to = split_ab(raw)
+            cur = {
+                "from": frm,
+                "to": to,
+                "old_path": strip_prefix(frm),
+                "new_path": strip_prefix(to),
+                "mode": "modified",
+                "old_mode": None,
+                "new_mode": None,
+                "old_oid": None,
+                "new_oid": None,
+                "similarity": None,
+                "hunks": [],
+            }
+            continue
+
+        if cur is None:
+            continue
+
+        if raw.startswith("new file mode "):
+            cur["mode"] = "added"
+            cur["new_mode"] = raw.split()[-1]
+        elif raw.startswith("deleted file mode "):
+            cur["mode"] = "deleted"
+            cur["old_mode"] = raw.split()[-1]
+        elif raw.startswith("old mode "):
+            cur["old_mode"] = raw.split()[-1]
+        elif raw.startswith("new mode "):
+            cur["new_mode"] = raw.split()[-1]
+        elif raw.startswith("similarity index "):
+            cur["mode"] = "renamed"
+            try:
+                cur["similarity"] = int(raw.rstrip("%").split()[-1])
+            except ValueError:
+                pass
+        elif raw.startswith("rename from ") or raw.startswith("rename to "):
+            cur["mode"] = "renamed"
+        elif raw.startswith("copy from ") or raw.startswith("copy to "):
+            cur["mode"] = "renamed"  # treat copies as renames for simplicity
+        elif raw.startswith("Binary files "):
+            cur["mode"] = "binary"
+        elif raw.startswith("index "):
+            # index abc..def 100644
+            parts = raw.split()
+            if len(parts) >= 2:
+                oids = parts[1].split("..")
+                if len(oids) == 2:
+                    cur["old_oid"], cur["new_oid"] = oids[0], oids[1]
+            if len(parts) >= 3:
+                if cur["old_mode"] is None and cur["mode"] != "added":
+                    cur["old_mode"] = parts[2]
+                if cur["new_mode"] is None and cur["mode"] != "deleted":
+                    cur["new_mode"] = parts[2]
+        elif raw.startswith("--- ") or raw.startswith("+++ "):
+            continue
+        elif raw.startswith("@@ "):
+            m = HUNK_RE.match(raw)
+            if not m:
+                continue
+            close_hunk()
+            old_start = int(m["oa"])
+            old_lines = int(m["ob"]) if m["ob"] else 1
+            new_start = int(m["na"])
+            new_lines = int(m["nb"]) if m["nb"] else 1
+            old_no, new_no = old_start, new_start
+            hunk = {
+                "old_start": old_start,
+                "old_lines": old_lines,
+                "new_start": new_start,
+                "new_lines": new_lines,
+                "header": raw,
+                "lines": [],
+            }
+        elif hunk is not None and raw.startswith(" "):
+            hunk["lines"].append(
+                {"op": " ", "old_no": old_no, "new_no": new_no, "text": raw[1:]}
+            )
+            old_no += 1
+            new_no += 1
+        elif hunk is not None and raw.startswith("-"):
+            hunk["lines"].append(
+                {"op": "-", "old_no": old_no, "new_no": None, "text": raw[1:]}
+            )
+            old_no += 1
+        elif hunk is not None and raw.startswith("+"):
+            hunk["lines"].append(
+                {"op": "+", "old_no": None, "new_no": new_no, "text": raw[1:]}
+            )
+            new_no += 1
+        elif raw.startswith("\\"):
+            # "\ No newline at end of file" — ignore
+            continue
+
+    close_file()
+    return files
+
+
+def main() -> int:
+    diff = run_diff(sys.argv[1:])
+    files = parse(diff)
+    json.dump(files, sys.stdout, indent=2)
+    sys.stdout.write("\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
